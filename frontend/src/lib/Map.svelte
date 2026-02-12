@@ -5,160 +5,171 @@
 
   let mapElement;
   let map;
-  let zoom = $state(13); // Храним текущий зум
-  const markers = new Map();
-
-  // Динамическая иконка с масштабированием (Шаг: Адаптивность)
-  const createBusIcon = (route, currentZoom) => {
-    // Рассчитываем коэффициент масштаба относительно базового зума 13
-    const scale = Math.max(0.5, Math.pow(1.3, currentZoom - 13));
-    const baseSize = 30;
-    const size = baseSize * scale;
-    // Делаем шрифт пропорционально крупнее и жирнее
-    const fontSize = 7; // В единицах viewBox (0-24)
-    
-    return L.divIcon({
-      className: 'bus-icon',
-      html: `
-        <svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M4 16C4 17.1 4.9 18 6 18H18C19.1 18 20 17.1 20 16V6C20 4.9 19.1 4 18 4H6C4.9 4 4 4.9 4 6V16Z" fill="#3B82F6"/>
-          <path d="M18 18V20H16V18H8V20H6V18" stroke="#1E40AF" stroke-width="2" stroke-linecap="round"/>
-          <rect x="5" y="5" width="14" height="8" rx="1" fill="#93C5FD"/>
-          <text x="12" y="11" 
-                font-family="Arial, sans-serif" 
-                font-size="${fontSize}" 
-                font-weight="900" 
-                fill="#1E3A8A" 
-                text-anchor="middle" 
-                dominant-baseline="middle"
-                style="pointer-events: none;">${route}</text>
-          <circle cx="8" cy="15" r="1.5" fill="#1E3A8A"/>
-          <circle cx="16" cy="15" r="1.5" fill="#1E3A8A"/>
-        </svg>
-      `,
-      iconSize: [size, size],
-      iconAnchor: [size / 2, size / 2],
-      popupAnchor: [0, -size / 2]
-    });
-  };
-
+  
   onMount(() => {
-    const center = [55.751244, 37.618423];
-    map = L.map(mapElement, { attributionControl: false }).setView(center, 13);
+    map = L.map(mapElement, { 
+      attributionControl: false,
+      zoomControl: false,
+      center: [55.751244, 37.618423],
+      zoom: 13,
+      preferCanvas: true
+    });
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png').addTo(map);
 
-    // Шаг 13: Отправляем координаты окна сервера при движении карты
+    L.BusLayer = L.Layer.extend({
+      onAdd: function(map) {
+        this._map = map;
+        this._canvas = L.DomUtil.create('canvas', 'leaflet-bus-layer');
+        this._canvas.style.position = 'absolute';
+        this._canvas.style.top = '0';
+        this._canvas.style.left = '0';
+        this._canvas.style.pointerEvents = 'none';
+        this._canvas.style.zIndex = '999';
+        map.getContainer().appendChild(this._canvas);
+        this._ctx = this._canvas.getContext('2d', { alpha: true });
+        
+        map.on('move zoom viewreset', this._reset, this);
+        this._reset();
+        this._animate();
+      },
+
+      onRemove: function(map) {
+        map.getContainer().removeChild(this._canvas);
+        cancelAnimationFrame(this._requestId);
+      },
+
+      _reset: function() {
+        const size = this._map.getSize();
+        if (this._canvas.width !== size.x || this._canvas.height !== size.y) {
+          this._canvas.width = size.x;
+          this._canvas.height = size.y;
+        }
+      },
+
+      _animate: function() {
+        this._draw();
+        this._requestId = requestAnimationFrame(this._animate.bind(this));
+      },
+
+      _draw: function() {
+        if (!this._map) return;
+        const ctx = this._ctx;
+        const size = this._map.getSize();
+        const now = performance.now();
+        const duration = 200;
+
+        ctx.clearRect(0, 0, size.x, size.y);
+        
+        const buses = busStore.buses;
+        if (buses.size === 0) return;
+
+        // Группируем по 10 цветам
+        const groups = Array.from({length: 10}, () => []);
+
+        for (const bus of buses.values()) {
+          // 1. Интерполяция
+          let t = (now - bus.startTime) / duration;
+          if (t > 1) t = 1;
+          
+          const lat = bus.startLat + (bus.targetLat - bus.startLat) * t;
+          const lng = bus.startLng + (bus.targetLng - bus.startLng) * t;
+          bus.curLat = lat;
+          bus.curLng = lng;
+
+          // 2. Проекция (ContainerPoint гарантирует точность при движении)
+          const point = this._map.latLngToContainerPoint([lat, lng]);
+
+          if (point.x < -5 || point.y < -5 || point.x > size.x + 5 || point.y > size.y + 5) continue;
+
+          groups[Math.floor(bus.route % 10)].push(point.x, point.y);
+        }
+
+        // 3. Отрисовка пачками
+        ctx.lineWidth = 0.5;
+        ctx.strokeStyle = "rgba(255,255,255,0.6)";
+        
+        groups.forEach((coords, i) => {
+          if (coords.length === 0) return;
+          ctx.beginPath();
+          ctx.fillStyle = `hsl(${(i * 36) % 360}, 100%, 65%)`;
+          for (let j = 0; j < coords.length; j += 2) {
+            const x = coords[j];
+            const y = coords[j+1];
+            ctx.moveTo(x + 2.5, y);
+            ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+          }
+          ctx.fill();
+          ctx.stroke();
+        });
+      }
+    });
+
+    map.addLayer(new L.BusLayer());
+
     const sendBounds = () => {
-      const bounds = map.getBounds();
-      const southWest = bounds.getSouthWest();
-      const northEast = bounds.getNorthEast();
-
-      const message = {
+      const b = map.getBounds();
+      const msg = {
         msgType: 'newBounds',
         data: {
-          southWest: { lat: southWest.lat, lng: southWest.lng },
-          northEast: { lat: northEast.lat, lng: northEast.lng }
+          southWest: { lat: b.getSouthWest().lat, lng: b.getSouthWest().lng },
+          northEast: { lat: b.getNorthEast().lat, lng: b.getNorthEast().lng }
         }
       };
-      
-      if (busStore.socket && busStore.socket.readyState === WebSocket.OPEN) {
-        busStore.socket.send(JSON.stringify(message));
+      if (busStore.socket?.readyState === WebSocket.OPEN) {
+        busStore.socket.send(JSON.stringify(msg));
       }
     };
 
     map.on('moveend', sendBounds);
-    
-    // Отправляем начальные координаты сразу после загрузки
     setTimeout(sendBounds, 1000);
-
-    return () => {
-      map.off('moveend', sendBounds);
-      map.remove();
-    };
-  });
-
-  // Реактивный эффект: следим за изменениями в busStore.buses И зумом
-  $effect(() => {
-    if (!map) return;
-
-    const currentBuses = busStore.buses;
-    
-    // 1. Обновляем или добавляем маркеры
-    for (const [id, bus] of Object.entries(currentBuses)) {
-      if (markers.has(id)) {
-        const marker = markers.get(id);
-        marker.setLatLng([bus.lat, bus.lng]);
-        
-        // ТОНКОСТЬ: Обновляем иконку ТОЛЬКО если зум изменился.
-        // Leaflet хранит текущий зум в объекте маркера или мы можем проверить вручную.
-        if (marker._lastZoom !== zoom) {
-          marker.setIcon(createBusIcon(bus.route, zoom));
-          marker._lastZoom = zoom;
-        }
-      } else {
-        const icon = createBusIcon(bus.route, zoom);
-        const marker = L.marker([bus.lat, bus.lng], { icon })
-          .bindPopup(`Bus Route: ${bus.route}`)
-          .addTo(map);
-        marker._lastZoom = zoom;
-        markers.set(id, marker);
-      }
-    }
-
-    // 2. Удаляем старые маркеры
-    const currentIds = new Set(Object.keys(currentBuses));
-    for (const [id, marker] of markers.entries()) {
-      if (!currentIds.has(id)) {
-        map.removeLayer(marker);
-        markers.delete(id);
-      }
-    }
   });
 </script>
 
-<div class="status-indicator" class:connected={busStore.isConnected}>
-  {busStore.isConnected ? 'Connected' : 'Disconnected'}
+<div class="glass-hud">
+  <div class="status-row">
+    <div class="indicator" class:online={busStore.isConnected}></div>
+    <div class="label">{busStore.isConnected ? 'NEXUS ONLINE' : 'LINK OFFLINE'}</div>
+  </div>
+  <div class="stats-row">
+    <div class="big-number">{busStore.count.toLocaleString()}</div>
+    <div class="sub-label">ACTIVE TERMINALS</div>
+  </div>
 </div>
 
 <div bind:this={mapElement} class="map-container"></div>
 
 <style>
-  .map-container {
-    height: 100vh; /* Fallback for older browsers */
-    height: 100dvh; /* Modern dynamic viewport height */
-    width: 100vw;
-    position: absolute;
-    top: 0;
-    left: 0;
-    z-index: 1;
-  }
+  :global(body) { margin: 0; background: #050505; overflow: hidden; }
+  .map-container { width: 100vw; height: 100vh; background: #050505; }
 
-  .status-indicator {
+  .glass-hud {
     position: absolute;
-    top: 10px;
-    right: 10px;
-    z-index: 1000;
-    padding: 5px 10px;
-    background: rgba(255, 0, 0, 0.7);
-    color: white;
-    border-radius: 4px;
-    font-family: sans-serif;
-    font-size: 12px;
+    top: 25px;
+    right: 25px;
+    z-index: 2000;
+    background: rgba(10, 10, 15, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 15px 20px;
+    font-family: 'Inter', system-ui, sans-serif;
+    color: #fff;
+    min-width: 180px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
     pointer-events: none;
   }
 
-  .status-indicator.connected {
-    background: rgba(0, 255, 0, 0.7);
-    color: black;
-  }
+  .status-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .indicator { width: 8px; height: 8px; background: #ff3e00; border-radius: 50%; box-shadow: 0 0 10px #ff3e00; }
+  .indicator.online { background: #00ff88; box-shadow: 0 0 15px #00ff88; animation: breathe 2s infinite; }
+  .label { font-size: 10px; font-weight: 800; letter-spacing: 2px; color: rgba(255,255,255,0.5); }
+  .big-number { font-size: 38px; font-weight: 900; line-height: 1; color: #fff; }
+  .sub-label { font-size: 9px; font-weight: 600; color: #00ff88; letter-spacing: 1px; margin-top: 4px; }
 
-  /* Стили для иконки автобуса */
-  :global(.bus-icon) {
-    background: transparent;
-    border: none;
-    /* transition чуть дольше чем интервал обновления (0.1s), 
-       чтобы сгладить сетевой джиттер */
-    transition: transform 0.15s linear; 
+  @keyframes breathe { 
+    0%, 100% { opacity: 1; transform: scale(1); } 
+    50% { opacity: 0.6; transform: scale(0.9); } 
   }
 </style>

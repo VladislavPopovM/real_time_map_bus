@@ -1,9 +1,9 @@
 export class BusStore {
-  // Используем руну $state для реактивности.
-  // Храним автобусы как объект: { "busId": { lat, lng, route, ... } }
-  buses = $state({});
+  // Карта автобусов: id -> { id, route, curLat, curLng, startLat, startLng, targetLat, targetLng, startTime }
+  buses = new Map(); 
   socket = null;
   isConnected = $state(false);
+  count = $state(0);
 
   constructor(url = 'ws://localhost:8000') {
     this.connect(url);
@@ -11,40 +11,58 @@ export class BusStore {
 
   connect(url) {
     this.socket = new WebSocket(url);
-
-    this.socket.onopen = () => {
-      console.log('WS Connected');
-      this.isConnected = true;
-    };
-
+    this.socket.binaryType = 'arraybuffer';
+    this.socket.onopen = () => { this.isConnected = true; };
     this.socket.onclose = () => {
-      console.log('WS Disconnected');
       this.isConnected = false;
-      // Простейший реконнект через 2 секунды
       setTimeout(() => this.connect(url), 2000);
     };
-
-    this.socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        this.handleMessage(data);
-      } catch (e) {
-        console.error('Failed to parse WS message:', e);
-      }
-    };
+    this.socket.onmessage = (event) => { this.handleBinaryMessage(event.data); };
   }
 
-  handleMessage(data) {
-    if (data.msgType === 'Buses' && Array.isArray(data.buses)) {
-      // Клонируем объект, чтобы Svelte гарантированно увидел изменения
-      const newBuses = { ...this.buses };
-      data.buses.forEach(bus => {
-        newBuses[bus.busId] = bus;
-      });
-      this.buses = newBuses;
+  handleBinaryMessage(buffer) {
+    if (!(buffer instanceof ArrayBuffer)) return;
+    const data = new Float32Array(buffer);
+    const now = performance.now();
+    const seenIds = new Set();
+
+    for (let i = 0; i < data.length; i += 4) {
+      const id = data[i];
+      const lat = data[i+1];
+      const lng = data[i+2];
+      const route = data[i+3];
+      seenIds.add(id);
+
+      if (this.buses.has(id)) {
+        const bus = this.buses.get(id);
+        // Если данные изменились — начинаем ПЛАВНЫЙ переход от текущей точки
+        if (bus.targetLat !== lat || bus.targetLng !== lng) {
+          bus.startLat = bus.curLat || bus.startLat;
+          bus.startLng = bus.curLng || bus.startLng;
+          bus.targetLat = lat;
+          bus.targetLng = lng;
+          bus.startTime = now;
+        }
+      } else {
+        // Новый автобус: появляется мгновенно
+        this.buses.set(id, {
+          id, route,
+          curLat: lat, curLng: lng,
+          startLat: lat, startLng: lng,
+          targetLat: lat, targetLng: lng,
+          startTime: now
+        });
+      }
     }
+
+    // Редкая очистка зомби (раз в 5 пакетов)
+    if (Math.random() > 0.8) {
+      for (const id of this.buses.keys()) {
+        if (!seenIds.has(id)) this.buses.delete(id);
+      }
+    }
+    this.count = this.buses.size;
   }
 }
 
-// Создаем синглтон (глобальный инстанс), если нужно одно подключение на все приложение
 export const busStore = new BusStore();

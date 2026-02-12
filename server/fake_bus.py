@@ -11,9 +11,14 @@ from trio_websocket import open_websocket_url, ConnectionClosed
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FakeBus")
 
+# Глобальный кэш маршрутов
+ROUTES_CACHE = {}
+
 def load_route(filepath):
-    with open(filepath, "r", encoding='utf-8') as f:
-        return json.load(f)
+    if filepath not in ROUTES_CACHE:
+        with open(filepath, "r", encoding='utf-8') as f:
+            ROUTES_CACHE[filepath] = json.load(f)
+    return ROUTES_CACHE[filepath]
 
 # --- Шаг 12: Механизм переподключений ---
 

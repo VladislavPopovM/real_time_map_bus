@@ -1,11 +1,13 @@
 export class BusStore {
-  // Карта автобусов: id -> { id, route, curLat, curLng, startLat, startLng, targetLat, targetLng, startTime }
   buses = new Map(); 
   socket = null;
   isConnected = $state(false);
   count = $state(0);
+  ups = $state(0); // Updates per second
 
   constructor(url = 'ws://localhost:8000') {
+    this._msgCount = 0;
+    this._lastUpsUpdate = 0;
     this.connect(url);
   }
 
@@ -17,7 +19,20 @@ export class BusStore {
       this.isConnected = false;
       setTimeout(() => this.connect(url), 2000);
     };
-    this.socket.onmessage = (event) => { this.handleBinaryMessage(event.data); };
+    this.socket.onmessage = (event) => { 
+      this._msgCount++;
+      this.handleBinaryMessage(event.data); 
+      this.updateUps();
+    };
+  }
+
+  updateUps() {
+    const now = performance.now();
+    if (now - this._lastUpsUpdate > 1000) {
+      this.ups = this._msgCount;
+      this._msgCount = 0;
+      this._lastUpsUpdate = now;
+    }
   }
 
   handleBinaryMessage(buffer) {
@@ -35,16 +50,22 @@ export class BusStore {
 
       if (this.buses.has(id)) {
         const bus = this.buses.get(id);
-        // Если данные изменились — начинаем ПЛАВНЫЙ переход от текущей точки
-        if (bus.targetLat !== lat || bus.targetLng !== lng) {
+        const dist = Math.abs(bus.targetLat - lat) + Math.abs(bus.targetLng - lng);
+        
+        // Телепортация при больших прыжках
+        if (dist > 0.05) {
+          bus.curLat = lat; bus.curLng = lng;
+          bus.startLat = lat; bus.startLng = lng;
+        } else {
+          // Мягкое переключение: начинаем с текущей позиции
           bus.startLat = bus.curLat || bus.startLat;
           bus.startLng = bus.curLng || bus.startLng;
-          bus.targetLat = lat;
-          bus.targetLng = lng;
-          bus.startTime = now;
         }
+        
+        bus.targetLat = lat;
+        bus.targetLng = lng;
+        bus.startTime = now;
       } else {
-        // Новый автобус: появляется мгновенно
         this.buses.set(id, {
           id, route,
           curLat: lat, curLng: lng,
@@ -55,8 +76,7 @@ export class BusStore {
       }
     }
 
-    // Редкая очистка зомби (раз в 5 пакетов)
-    if (Math.random() > 0.8) {
+    if (Math.random() > 0.9) {
       for (const id of this.buses.keys()) {
         if (!seenIds.has(id)) this.buses.delete(id);
       }

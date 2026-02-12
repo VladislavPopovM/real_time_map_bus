@@ -39,7 +39,8 @@ class WindowBounds:
     east_lng: float = 0
 
     def is_inside(self, lat: float, lng: float) -> bool:
-        if not all([self.south_lat, self.north_lat, self.west_lng, self.east_lng]):
+        # Если границы не заданы, шлем всё (Шаг: Мгновенный старт)
+        if not any([self.south_lat, self.north_lat, self.west_lng, self.east_lng]):
             return True
         return (self.south_lat <= lat <= self.north_lat) and \
                (self.west_lng <= lng <= self.east_lng)
@@ -58,11 +59,13 @@ async def talk_to_browser(ws, bounds, buses_dict):
                 if bounds.is_inside(bus.lat, bus.lng):
                     visible_data.extend([bus.numeric_id, bus.lat, bus.lng, bus.numeric_route])
             
-            if visible_data:
-                binary_packet = struct.pack(f'<{len(visible_data)}f', *visible_data)
-                await ws.send_message(binary_packet)
-            
-            await trio.sleep(0.2)
+            if binary_packet:
+                try:
+                    await ws.send_message(binary_packet)
+                except ConnectionClosed:
+                    break
+        
+        await trio.sleep(0.1) # Высокая частота для идеальной плавности
         except ConnectionClosed:
             break
 
